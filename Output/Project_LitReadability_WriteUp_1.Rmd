@@ -1,0 +1,148 @@
+---
+title: 'Predicting Readability of Literature Excerpts'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    keep_md: yes
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE) # this stops code from showing, can add to individual blocks instead of global option
+```
+```{r functions, include=FALSE}
+# A function for captioning and referencing images
+fig <- local({
+    i <- 0
+    ref <- list()
+    list(
+        cap=function(refName, text) {
+            i <<- i + 1
+            ref[[refName]] <<- i
+            paste("Figure ", i, ": ", text, sep="")
+        },
+        ref=function(refName) {
+            ref[[refName]]
+        })
+})
+```
+
+## Abstract
+
+The aim of this project is to predict the 'ease of reading' of an excerpt of text from a book for schoolchildren. In this analysis we consider two approaches to the modelling stage. The first stage, common to all modelling approaches, is to pre-process the excerpt texts using standard techniques such as removing stop words and punctuation and word-stemming. In approach 1) we use a GloVe word-embedding encoder with CNN-LSTM layers to model the readability from the cleaned excerpt text and then modelling the residual with a gradient-boosted model using text-based features (e.g. average word length, average sentence length etc.). In approach 2) we use the Google trained sentence-embedding encoder *Universal Sentence Encoder*. Sentence-embeddings tend to perform better than word-embeddings because the attention layers can retain context through longer sequences of text. 
+
+## Introduction
+
+The data and problem is taken from a Kaggle competition to judge the difficulty of a passage of text with the aim of helping schoolchildren read books at an appropriate reading level. The data is composed of a training dataset and a hidden test dataset, and the two columns of interest are the *target* (ease of readability) and the *excerpt* (passage of text from a book). 
+
+The target, ease of readability, is the result of many teachers evaluating an excerpt of text relative to another excerpt. An aggregation scoring metric, Bradley-Terry analysis, is used to calculate a single readability score for each text - the target. This means that there is a degree of variability in the readability score given to each excerpt - this suggests that one line of analysis is to use a Bayesian approach that incorporates the uncertainty around the repeated measurements, however unfortunately the individual ratings are not provided, only the aggregated score.
+
+The training dataset can be seen in the preview:
+```{r}
+df_train = read.csv("D:/Phillip/GitHub/LitReadability_Local/Data/dataset.csv", stringsAsFactors = FALSE)
+df_train[1:3, ]
+```
+
+
+## Data Analysis
+
+A brief exploratory data analysis is given here. The focus is on the target column and assessing correlations between text features and the target to inform the GBM feature selection process.
+
+```{r}
+library(cowplot)
+library(ggplot2)
+
+target_hist <- ggplot(df_train, aes(x = target)) + geom_histogram(aes(y=..density..), colour="blue") + 
+  theme_bw() + labs(title = "Target Histogram", x = "Target", y = "Count")
+
+target_se <- ggplot(df_train, aes(x = target, y = standard_error)) + geom_point() + theme_bw() +
+  theme(legend.position = c(0.8, 0.8)) + labs(title = "Target Against Standard Error", x = "Target", y = "Standard Error")
+
+plot_grid(target_hist, target_se, labels = "AUTO")
+```
+
+The standard error comes from the multiple comparisons that are used to form the aggregated target, ease of readability, score. The benchmark exerpt used as a comparison can be seen as the point at (0,0).
+
+The next step, is to look for correlations between the target score and features that can be derived from the text. 
+```{r echo=FALSE, fig.align='center', fig.cap=fig$cap("corrplot", "Spearman correlation plot."), out.width='80%'}
+knitr::include_graphics('D:/Phillip/GitHub/LitReadability_Local/Output/Plots/correlation_plot_target.png')
+```
+The correlation plot (ref corrplot) shows the correlation between target and a large number of features derived from the cleaned excerpt text. Noteworthy correlations are the ratio of unique words in the text to total word count (positive correlation) and number of infrequent words from the corpus in the text, number of characters and number of sentences (negative correlation). The infrequent word count metric is the total number of words that appear rarely in the combined corpus of all text excerpts, appearing in that excerpt. The positive correlation means that more unique words means more difficult readability score and the negative correlation means fewer characters, sentences and infrequent words means an easier readability score.
+
+## Pre-Processing Steps
+
+**Text Pre-Processing**
+The text are excerpts from books aimed at schoolchildren so very little formal cleaning is required, compared to say posts from twitter. However, to achieve better performance from the model fitting we will use lowercase, remove punctuation and remove stop words. This is done using the *NLTK* library.
+
+**Centered Target**
+In the target histogram figure we can see that the target values are not centered around zero, and we know that many statistical techniques find optimal solutions more reliably if the dependent variable has mean zero.Therefore we use the mean of the target to centre this variable
+$$ \tilde{t}_i = t_i - \bar{t}, \quad \forall i $$
+where $t$ is the original target and $\tilde{t}$ is the centered target.
+
+## Baseline Model
+
+The baseline model is a simple approach to predicting the target that serves as a benchmark for the more complicated models. The baseline model is the mean of the target
+$$ y_i = \bar{y}, \quad \forall i . $$
+
+## Method 1 : Word Embedding Encoder CNN-LSTM and GBM Residual 
+
+The approach taken is to use a two-step model; first, a word-embedding recurrent neural network is used to predict the target from the excerpt and then a gradient-boosted model (GBM) is fit to the residual of the target and predicted target from stage 1 using features derived from the excerpts. 
+
+**Stage 1 : GloVe Embedding Layer with CNN-LSTM Layers : Tensorflow**
+
+The Global Vectors for Word Representation (GloVe) is a method to create vector representations of words to pass into statistical models, e.g. regression, support vector machines and machine learning such as recurrent neural networks. The GloVe pre-trained model that we use is the 50d version trained on Wikipedia; the 50d refers to the dimension of the vector representation. The excellent part of the vector representation is that vector algebra can be used to calculate distances between "words" in the vector space. 
+
+The recurrent neural network that takes as input the word-embedding encoder layer is composed of several layers that were identified using a cross-validation procedure. The layers are two one-dimensional CNNs, a max pooling layer, a LSTM layer, a dense neural network layer and finally the full neural network layer with one node that outputs the target. 
+
+```{r echo=FALSE, fig.align='center', fig.cap=fig$cap("corrplot", "GloVe CNN-LSTM Architecture."), out.width='80%'}
+knitr::include_graphics('D:/Phillip/GitHub/LitReadability_Local/Output/Plots/GloVe_cnn_lstm_architecture.png')
+```
+
+**Stage 2 : GBM with the Residual**
+
+The second stage of this approach is to take the residual from stage 1 and fit a GBM with features derived from the text alone. 
+
+Denote the predicted targets from the stage 1 model, word-embedding and RNNs, as $\hat{y}^1$ and the actual targets as $y$, then the dependent variable to the GBM is
+$$ \tilde{y}_i = y_i - \hat{y}^1_i . $$
+
+The following features are created: infrequent word ratio, unique word ratio, clause count, character count and word count. Infrequent words are words that appear in very few texts and unique words are the dictionary of words that appear in a text. For clause count, character and word count we calculate the minimum, maximum, mean, median and inter-quantile value over the sentences in each text. 
+
+The importance plot from the GBM is given below:
+
+```{r echo=FALSE, fig.align='center', fig.cap=fig$cap("corrplot", "Feature Importance Plot."), out.width='80%'}
+knitr::include_graphics('D:/Phillip/GitHub/LitReadability_Local/Output/Plots/gbm_feature_importance.png')
+```
+
+## Method 2 : Universal Sentence Encoder (USE) with Full Neural Net 
+
+The Universal Sentence Encoder model addresses a short-coming of the word embedding models, a difficulty retaining long-range dependencies. The sentence-level embedding is trained using a transformer-encoder architecture which have been generally shown to outperform word embeddings, which is attributed to the ability to learn relationships between words that are much farther apart.
+
+In this method the output of the universal sentence encoder is passed into a series of fully-connected neural networks. The architecture is given below.
+
+```{r echo=FALSE, fig.align='center', fig.cap=fig$cap("corrplot", "USE NN Architecture"), out.width='60%'}
+knitr::include_graphics('D:/Phillip/GitHub/LitReadability_Local/Output/Plots/use_nn_architecture.png')
+```
+
+## Results
+
+The validation results on the test dataset for the baseline (mean of target) model, the GloVe embedding model and the USE model are compared by calculating the RMSE between the target and the predicted values. The RMSE residual, denoted $r$, is defined
+$$  r_i =  \forall i  . $$
+The results are presented below.
+
+| Method | RMSE |  
+|----------------|------------------------|
+| Baseline (mean) | 1.084 |
+| GloVe CNN-LSTM + GBM | 0.692 | 
+| Universal Sentence Encoder | 0.438 |
+
+From the RMSE comparisons we see clearly that both approaches are better than the baseline model, the mean of the targets, and that the sentence-embedding method is out-performing the word-embedding method + GBM approach.
+
+In addition, we plot the residual of the target and predicted targets:
+```{r echo=FALSE, fig.align='center', fig.cap=fig$cap("corrplot", "Residual against Target"), out.width='80%'}
+knitr::include_graphics('D:/Phillip/GitHub/LitReadability_Local/Output/Plots/residual_target_plot.png')
+```
+
+
+
+
